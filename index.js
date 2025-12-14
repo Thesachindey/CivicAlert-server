@@ -3,7 +3,7 @@ const express = require('express')
 const cors = require('cors')
 require("dotenv").config()
 const app = express()
-const port = 3000
+const port = process.env.PORT || 3000
 // -------------------
 app.use(express.json())
 app.use(cors())
@@ -25,16 +25,45 @@ async function run() {
         // await client.connect();
         // --------------- start from here----------------
         //database connection
-        const db = client.db('issue-db')
-    
+        const db = client.db('civic-alert-db')
+        const issuesCollection = db.collection('issues');
+
 
         //-------------------
         //database theke data niye asbo, data manipulate korbo, data add korbo, by api methods
 
         //GET all events data [find().toArray(), findOne().toArray()] by using GET api methods
         //we can check GET api data by browser directly
-     
 
+
+        //issues related api 
+        app.post('/issues', async (req, res) => {
+            const issue = req.body;
+            const { title, description, category, priority, image, location, createdBy } = issue;
+
+            // Basic validation
+            if (!title || !description || !category || !priority || !location || !createdBy) {
+                return res.status(400).send({ message: "Missing required fields" });
+            }
+
+            // Create issue document
+            const newIssue = {
+                title,
+                description,
+                category,        // must match your categories
+                priority,        // High / Normal
+                status: "Pending",
+                image: image || "",  // optional
+                location,
+                createdBy,
+                createdAt: new Date(),
+                updatedAt: new Date()
+            };
+
+            // Insert into DB
+            const result = await issuesCollection.insertOne(newIssue);
+            res.send(result);
+        });
 
 
 
