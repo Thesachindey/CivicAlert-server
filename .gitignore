@@ -27,3 +27,4 @@ serviceAccountKey.json
 # Block any JSON file that might look like a key (Safety Net)
 *serviceAccountKey.json
 civic-alert-firebase-adminsdk.json
+.vercel
