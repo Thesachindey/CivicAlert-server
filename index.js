@@ -18,7 +18,7 @@ admin.initializeApp({
 app.use(express.json());
 app.use(cors());
 
-// --- JWT Middleware ---
+//  JWT Middleware 
 const verifyJWT = async (req, res, next) => {
     const authorization = req.headers.authorization;
     if (!authorization) {
@@ -46,12 +46,27 @@ const client = new MongoClient(uri, {
 
 async function run() {
     try {
+
+
+        // start from here
+        // -----------------------------------------------------
         const db = client.db("civic-alert-db");
         const issuesCollection = db.collection("issues");
         const usersCollection = db.collection("users");
         const paymentsCollection = db.collection("payments");
+        // ---------------------------------------------------------
 
-        // --- Role Verification Middlewares ---
+        const verifyActive = async (req, res, next) => {
+            const email = req.decoded.email;
+            const query = { email: email };
+            const user = await usersCollection.findOne(query);
+
+            if (user?.isBlocked) {
+                return res.status(403).send({ message: 'Forbidden: Your account is blocked.' });
+            }
+            next();
+        };
+
         const verifyAdmin = async (req, res, next) => {
             const email = req.decoded.email;
             const query = { email: email };
@@ -67,47 +82,35 @@ async function run() {
             if (user?.role !== 'staff' && user?.role !== 'admin') return res.status(403).send({ message: 'Forbidden access' });
             next();
         };
-
-        // ==========================================================
-        //  💰 PAYMENT & STRIPE APIs
-        // ==========================================================
-
-        app.post('/create-checkout-session', verifyJWT, async (req, res) => {
-            // Unpack data
+        // ---------------------------------------------------------
+        //payment related apis
+        app.post('/create-checkout-session', verifyJWT, verifyActive, async (req, res) => {
             const { price, amount, paymentType, customerEmail, customerName, issueData } = req.body;
-            const finalPrice = amount || price || 10; // Default to 10 if missing
-            
+            const finalPrice = amount || price || 10;
+
             let metadata = {
                 email: customerEmail,
                 name: customerName,
-                paymentType: paymentType 
+                paymentType: paymentType
             };
-            
+
             let productName = 'Civic Alert Payment';
             let productDesc = 'Payment Transaction';
 
             try {
-                // --- CASE A: SUBSCRIPTION ---
                 if (paymentType === 'subscription') {
                     productName = 'Premium Citizen Subscription';
                     productDesc = 'Unlimited reports & Verified Badge';
-                }
-                
-                // --- CASE B: ISSUE PROMOTION ---
-                else if (issueData) {
+                } else if (issueData) {
                     let targetIssueId;
-
-                    // Check if we are boosting an EXISTING issue (from Details page)
                     if (issueData._id) {
                         targetIssueId = issueData._id;
-                    } 
-                    // Or creating a NEW issue (from Insert page)
-                    else {
+                    } else {
                         const newIssue = {
                             ...issueData,
-                            priority: 'Normal', // Default until paid
+                            priority: 'Normal',
                             status: 'Pending',
-                            paymentStatus: 'Pending', 
+                            paymentStatus: 'Pending',
                             upvotes: 0,
                             upvotedBy: [],
                             createdAt: new Date(),
@@ -121,35 +124,28 @@ async function run() {
                         const savedIssue = await issuesCollection.insertOne(newIssue);
                         targetIssueId = savedIssue.insertedId.toString();
                     }
-                    
                     metadata.issueId = targetIssueId;
                     metadata.paymentType = 'issue_promotion';
-                    
                     productName = 'High Priority Issue Boost';
                     productDesc = `Promotion for: ${issueData.title}`;
                 }
 
-                // Create Session
                 const session = await stripe.checkout.sessions.create({
                     payment_method_types: ['card'],
                     customer_email: customerEmail,
                     line_items: [{
                         price_data: {
-                            currency: 'bdt', 
-                            product_data: {
-                                name: productName,
-                                description: productDesc,
-                            },
-                            unit_amount: parseInt(finalPrice * 100), 
+                            currency: 'bdt',
+                            product_data: { name: productName, description: productDesc },
+                            unit_amount: parseInt(finalPrice * 100),
                         },
                         quantity: 1,
                     }],
                     mode: 'payment',
                     metadata: metadata,
                     success_url: `${process.env.SITE_DOMAIN}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-                    cancel_url: `${process.env.SITE_DOMAIN}/payment-canceled`, 
+                    cancel_url: `${process.env.SITE_DOMAIN}/payment-canceled`,
                 });
-
                 res.send({ url: session.url });
             } catch (error) {
                 console.error("Stripe Error:", error);
@@ -157,15 +153,13 @@ async function run() {
             }
         });
 
-        // Payment Success Webhook
         app.post('/payment-success', async (req, res) => {
             const { sessionId } = req.body;
             try {
                 const session = await stripe.checkout.sessions.retrieve(sessionId);
                 const existingOrder = await paymentsCollection.findOne({ transactionId: session.payment_intent });
-                
+
                 if (session.status === 'complete' && !existingOrder) {
-                    // 1. Save Payment
                     const paymentRecord = {
                         transactionId: session.payment_intent,
                         email: session.metadata.email,
@@ -177,21 +171,17 @@ async function run() {
                     };
                     await paymentsCollection.insertOne(paymentRecord);
 
-                    // 2. Handle Subscription
                     if (session.metadata.paymentType === 'subscription') {
                         await usersCollection.updateOne(
                             { email: session.metadata.email },
                             { $set: { isPremium: true } }
                         );
-                    }
-                    
-                    // 3. Handle Issue Boost
-                    else if (session.metadata.paymentType === 'issue_promotion') {
+                    } else if (session.metadata.paymentType === 'issue_promotion') {
                         await issuesCollection.updateOne(
                             { _id: new ObjectId(session.metadata.issueId) },
-                            { 
+                            {
                                 $set: { priority: 'High', paymentStatus: 'Paid' },
-                                $push: { 
+                                $push: {
                                     timeline: {
                                         status: "Promoted",
                                         message: "Upgraded to High Priority 🚀",
@@ -203,7 +193,7 @@ async function run() {
                         );
                     }
                     return res.send({ success: true });
-                } 
+                }
                 return res.send({ success: true, message: "Already processed" });
             } catch (error) {
                 console.error(error);
@@ -211,24 +201,21 @@ async function run() {
             }
         });
 
-        // GET ALL PAYMENTS (Admin)
         app.get('/payments', verifyJWT, verifyAdmin, async (req, res) => {
             const result = await paymentsCollection.find().sort({ date: -1 }).toArray();
             res.send(result);
         });
+        //---------------------------------------------------
+        //issue related apis
 
-        // ==========================================================
-        //  ISSUE APIs
-        // ==========================================================
-
-        app.post("/issues", verifyJWT, async (req, res) => {
+        app.post("/issues", verifyJWT, verifyActive, async (req, res) => {
             const issue = req.body;
             const newIssue = {
                 ...issue,
                 upvotes: 0,
                 upvotedBy: [],
                 status: "Pending",
-                priority: "Normal", 
+                priority: "Normal",
                 createdAt: new Date(),
                 timeline: [{
                     status: "Pending",
@@ -248,9 +235,8 @@ async function run() {
             if (status) query.status = status;
             if (category) query.category = category;
 
-            // Sort: High Priority First, then Date Descending
             const issues = await issuesCollection.find(query)
-                .sort({ priority: 1, createdAt: -1 }) 
+                .sort({ priority: 1, createdAt: -1 })
                 .toArray();
             res.send(issues);
         });
@@ -266,36 +252,34 @@ async function run() {
             res.send(result);
         });
 
-        // Update Issue (Edit)
-        app.patch("/issues/:id", verifyJWT, async (req, res) => {
+        app.patch("/issues/:id", verifyJWT, verifyActive, async (req, res) => {
             const id = req.params.id;
             const item = req.body;
             const filter = { _id: new ObjectId(id) };
-            
             const updatedDoc = {
                 $set: {
                     title: item.title,
                     description: item.description,
                     category: item.category,
                     location: item.location,
-                    ...(item.image && { image: item.image }) 
+                    ...(item.image && { image: item.image })
                 }
             };
             const result = await issuesCollection.updateOne(filter, updatedDoc);
             res.send(result);
         });
 
-        // Delete Issue
-        app.delete("/issues/:id", verifyJWT, async (req, res) => {
+
+        app.delete("/issues/:id", verifyJWT, verifyActive, async (req, res) => {
             const result = await issuesCollection.deleteOne({ _id: new ObjectId(req.params.id) });
             res.send(result);
         });
 
-        // Upvote Issue
-        app.patch("/issues/upvote/:id", verifyJWT, async (req, res) => {
+
+        app.patch("/issues/upvote/:id", verifyJWT, verifyActive, async (req, res) => {
             const { id } = req.params;
             const { email } = req.body;
-            
+
             const issue = await issuesCollection.findOne({ _id: new ObjectId(id) });
             if (!issue) return res.status(404).send({ message: "Not found" });
             if (issue.createdBy === email) return res.status(403).send({ message: "Own issue" });
@@ -308,7 +292,6 @@ async function run() {
             res.send(result);
         });
 
-        // Check Upvote Status
         app.get("/issues/:id/upvote-status", async (req, res) => {
             const { id } = req.params;
             const { email } = req.query;
@@ -317,20 +300,14 @@ async function run() {
             res.send({ upvoted });
         });
 
-        // ASSIGN STAFF TO ISSUE (Admin Only)
         app.patch("/issues/assign/:id", verifyJWT, verifyAdmin, async (req, res) => {
             const id = req.params.id;
-            const { staffId, staffName, staffEmail } = req.body; 
-
+            const { staffId, staffName, staffEmail } = req.body;
             const filter = { _id: new ObjectId(id) };
             const updateDoc = {
                 $set: {
-                    assignedStaff: {
-                        staffId,
-                        name: staffName,
-                        email: staffEmail
-                    },
-                    status: "Pending" // Requirement: Remains pending until staff starts
+                    assignedStaff: { staffId, name: staffName, email: staffEmail },
+                    status: "Pending"
                 },
                 $push: {
                     timeline: {
@@ -341,17 +318,15 @@ async function run() {
                     }
                 }
             };
-
             const result = await issuesCollection.updateOne(filter, updateDoc);
             res.send(result);
         });
 
-        // REJECT ISSUE (Admin Only)
         app.patch("/issues/reject/:id", verifyJWT, verifyAdmin, async (req, res) => {
             const id = req.params.id;
             const result = await issuesCollection.updateOne(
                 { _id: new ObjectId(id) },
-                { 
+                {
                     $set: { status: "Rejected" },
                     $push: {
                         timeline: {
@@ -366,19 +341,18 @@ async function run() {
             res.send(result);
         });
 
-        // ==========================================================
-        //  USER & STAFF APIs
-        // ==========================================================
+        //-------------------------------------------------------
+        // user related apis
 
         app.post('/users', async (req, res) => {
             const user = req.body;
             const existingUser = await usersCollection.findOne({ email: user.email });
             if (existingUser) return res.send({ message: 'user exists' });
-            
+
             const newUser = {
                 ...user,
                 role: 'citizen',
-                isPremium: false, 
+                isPremium: false,
                 isBlocked: false,
                 createdAt: new Date(),
             };
@@ -386,47 +360,22 @@ async function run() {
             res.send(result);
         });
 
-        // 🚨 MOVED UP: Specific Staff Route must be BEFORE dynamic :email route
-        // GET ALL STAFF
+        // GET all staff
         app.get('/users/staff', verifyJWT, verifyAdmin, async (req, res) => {
             try {
                 const result = await usersCollection.find({ role: 'staff' }).toArray();
-                res.send(result || []); 
+                res.send(result || []);
             } catch (error) {
                 console.error("Error fetching staff:", error);
-                res.send([]); 
+                res.send([]);
             }
         });
 
-        // GET USER BY EMAIL (Dynamic Route)
-        app.get('/users/:email', verifyJWT, async (req, res) => {
-            const result = await usersCollection.findOne({ email: req.params.email });
-            res.send(result);
-        });
-
-        app.get('/users', verifyJWT, verifyAdmin, async (req, res) => {
-            const result = await usersCollection.find().toArray();
-            res.send(result);
-        });
-
-        // Block/Unblock User
-        app.patch('/users/block/:id', verifyJWT, verifyAdmin, async (req, res) => {
-            const id = req.params.id;
-            const { isBlocked } = req.body;
-            const filter = { _id: new ObjectId(id) };
-            const updateDoc = {
-                $set: { isBlocked: isBlocked }
-            };
-            const result = await usersCollection.updateOne(filter, updateDoc);
-            res.send(result);
-        });
-
-        // CREATE STAFF (Firebase + DB)
+        // create staff
         app.post('/users/staff', verifyJWT, verifyAdmin, async (req, res) => {
             const { email, password, name, photoURL } = req.body;
 
             try {
-                // 1. Create in Firebase Auth
                 const userRecord = await admin.auth().createUser({
                     email: email,
                     password: password,
@@ -434,7 +383,6 @@ async function run() {
                     photoURL: photoURL || "https://i.ibb.co/Zm9J5M4/user-placeholder.png"
                 });
 
-                // 2. Save to MongoDB
                 const newStaff = {
                     email: email,
                     name: name,
@@ -453,15 +401,12 @@ async function run() {
             }
         });
 
-        // Update Staff Info
         app.put('/users/staff/:id', verifyJWT, verifyAdmin, async (req, res) => {
             const id = req.params.id;
             const updatedData = req.body;
             const filter = { _id: new ObjectId(id) };
             const updateDoc = {
-                $set: {
-                    name: updatedData.name,
-                }
+                $set: { name: updatedData.name }
             };
             const result = await usersCollection.updateOne(filter, updateDoc);
             res.send(result);
@@ -472,48 +417,80 @@ async function run() {
             res.send(result);
         });
 
-        // --- ADMIN STATS (Advanced) ---
-        app.get('/admin-stats', verifyJWT, verifyAdmin, async (req, res) => {
+        app.get('/users/:email', verifyJWT, async (req, res) => {
+            const result = await usersCollection.findOne({ email: req.params.email });
+            res.send(result);
+        });
+
+        app.get('/users', verifyJWT, verifyAdmin, async (req, res) => {
+            const result = await usersCollection.find().toArray();
+            res.send(result);
+        });
+
+        app.patch('/users/block/:id', verifyJWT, verifyAdmin, async (req, res) => {
+            const id = req.params.id;
+            const { isBlocked } = req.body;
+            const filter = { _id: new ObjectId(id) };
+            const updateDoc = { $set: { isBlocked: isBlocked } };
+            const result = await usersCollection.updateOne(filter, updateDoc);
+            res.send(result);
+        });
+        //--------------------------------------------------
+        //all stats
+
+        app.get('/staff-stats/:email', verifyJWT, verifyStaff, async (req, res) => {
+            const email = req.params.email;
+            if (req.decoded.email !== email) return res.status(403).send({ message: 'Forbidden' });
+
             try {
-                // 1. Basic Counts
-                const totalUsers = await usersCollection.countDocuments({ role: 'citizen' });
-                const totalIssues = await issuesCollection.estimatedDocumentCount();
-                const resolvedIssues = await issuesCollection.countDocuments({ status: 'Resolved' });
-                const pendingIssues = await issuesCollection.countDocuments({ status: 'Pending' });
-                const rejectedIssues = await issuesCollection.countDocuments({ status: 'Rejected' });
+                const query = { "assignedStaff.email": email };
+                const totalAssigned = await issuesCollection.countDocuments(query);
+                const resolvedCount = await issuesCollection.countDocuments({ ...query, status: 'Resolved' });
+                const pendingCount = await issuesCollection.countDocuments({ ...query, status: 'Pending' });
+                const closedCount = await issuesCollection.countDocuments({ ...query, status: 'Closed' });
 
-                // 2. Revenue (Aggregation)
-                const revenueData = await paymentsCollection.aggregate([
-                    { $group: { _id: null, totalRevenue: { $sum: "$amount" } } }
+                res.send({ totalAssigned, resolvedCount, pendingCount, closedCount });
+            } catch (error) {
+                res.status(500).send({ message: error.message });
+            }
+        });
+
+        app.get('/citizen-stats/:email', verifyJWT, async (req, res) => {
+            const email = req.params.email;
+            if (req.decoded.email !== email) return res.status(403).send({ message: 'Forbidden' });
+
+            try {
+                const query = { createdBy: email };
+
+                const totalIssues = await issuesCollection.countDocuments(query);
+                const pendingIssues = await issuesCollection.countDocuments({ ...query, status: 'Pending' });
+                const inProgressIssues = await issuesCollection.countDocuments({ ...query, status: 'In Progress' });
+                const resolvedIssues = await issuesCollection.countDocuments({ ...query, status: 'Resolved' });
+
+                const paymentStats = await paymentsCollection.aggregate([
+                    { $match: { email: email } },
+                    { $group: { _id: null, totalPaid: { $sum: "$amount" } } }
                 ]).toArray();
-                const totalRevenue = revenueData.length > 0 ? revenueData[0].totalRevenue : 0;
 
-                // 3. Latest Data
-                const latestIssues = await issuesCollection.find().sort({ createdAt: -1 }).limit(5).toArray();
-                const latestPayments = await paymentsCollection.find().sort({ date: -1 }).limit(5).toArray();
-                const latestUsers = await usersCollection.find({ role: 'citizen' }).sort({ createdAt: -1 }).limit(5).toArray();
+                const totalPaid = paymentStats.length > 0 ? paymentStats[0].totalPaid : 0;
 
                 res.send({
-                    totalUsers,
                     totalIssues,
-                    resolvedIssues,
                     pendingIssues,
-                    rejectedIssues,
-                    totalRevenue,
-                    latestIssues,
-                    latestPayments,
-                    latestUsers
+                    inProgressIssues,
+                    resolvedIssues,
+                    totalPaid
                 });
             } catch (error) {
                 res.status(500).send({ message: error.message });
             }
         });
 
-        // --- STAFF DASHBOARD APIs ---
+
         app.get("/assigned-issues/:email", verifyJWT, verifyStaff, async (req, res) => {
             const email = req.params.email;
             if (req.decoded.email !== email) return res.status(403).send({ message: 'Forbidden' });
-            
+
             const query = { "assignedStaff.email": email };
             const result = await issuesCollection.find(query).sort({ status: 1, createdAt: -1 }).toArray();
             res.send(result);
@@ -521,8 +498,8 @@ async function run() {
 
         app.patch("/issues/status/:id", verifyJWT, verifyStaff, async (req, res) => {
             const id = req.params.id;
-            const { status } = req.body; 
-            
+            const { status } = req.body;
+
             const filter = { _id: new ObjectId(id) };
             const updateDoc = {
                 $set: { status: status },
@@ -545,7 +522,6 @@ async function run() {
     }
 }
 run().catch(console.dir);
-
 
 app.get('/', (req, res) => {
     res.send('The CivicAlert server is running!');
