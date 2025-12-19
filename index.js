@@ -437,6 +437,31 @@ async function run() {
         });
         //--------------------------------------------------
         //all stats
+        app.get('/admin-stats', verifyJWT, verifyAdmin, async (req, res) => {
+            try {
+                const totalUsers = await usersCollection.countDocuments({ role: 'citizen' });
+                const totalIssues = await issuesCollection.estimatedDocumentCount();
+                const resolvedIssues = await issuesCollection.countDocuments({ status: 'Resolved' });
+                const pendingIssues = await issuesCollection.countDocuments({ status: 'Pending' });
+                const rejectedIssues = await issuesCollection.countDocuments({ status: 'Rejected' });
+
+                const revenueData = await paymentsCollection.aggregate([
+                    { $group: { _id: null, totalRevenue: { $sum: "$amount" } } }
+                ]).toArray();
+                const totalRevenue = revenueData.length > 0 ? revenueData[0].totalRevenue : 0;
+
+                const latestIssues = await issuesCollection.find().sort({ createdAt: -1 }).limit(5).toArray();
+                const latestPayments = await paymentsCollection.find().sort({ date: -1 }).limit(5).toArray();
+                const latestUsers = await usersCollection.find({ role: 'citizen' }).sort({ createdAt: -1 }).limit(5).toArray();
+
+                res.send({
+                    totalUsers, totalIssues, resolvedIssues, pendingIssues, rejectedIssues, totalRevenue,
+                    latestIssues, latestPayments, latestUsers
+                });
+            } catch (error) {
+                res.status(500).send({ message: error.message });
+            }
+        });
 
         app.get('/staff-stats/:email', verifyJWT, verifyStaff, async (req, res) => {
             const email = req.params.email;
